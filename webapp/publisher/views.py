@@ -13,7 +13,7 @@ from flask import (
 )
 from flask.json import jsonify
 from webapp.config import DETAILS_VIEW_REGEX
-from webapp.decorators import login_required
+from webapp.decorators import login_required, cached_redirect
 from webapp.helpers import get_licenses
 
 publisher = Blueprint(
@@ -80,6 +80,7 @@ def collaboration(entity_name, path):
 
 @publisher.route("/accept-invite")
 @login_required
+@cached_redirect
 def accept_invite():
     return render_template("publisher/accept-invite.html")
 
@@ -158,10 +159,25 @@ def reject_post_invite():
 )
 @login_required
 def get_collaborators(entity_name):
-    collaborators = publisher_api.get_collaborators(
-        session["account-auth"], entity_name
-    )
-    return jsonify(collaborators)
+    res = {}
+
+    try:
+        collaborators = publisher_api.get_collaborators(
+            session["account-auth"], entity_name
+        )
+        res["success"] = True
+        res["data"] = collaborators["account_perms"]
+        response = make_response(res, 200)
+    except StoreApiResponseErrorList as error_list:
+        error_messages = [
+            f"{error.get('message', 'An error occured')}"
+            for error in error_list.errors
+        ]
+        res["message"] = " ".join(error_messages)
+        res["success"] = False
+        response = make_response(res, 500)
+
+    return response
 
 
 @publisher.route(

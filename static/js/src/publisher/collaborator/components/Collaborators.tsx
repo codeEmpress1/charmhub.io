@@ -1,7 +1,7 @@
 import React, { useState, SyntheticEvent } from "react";
 import { useParams } from "react-router-dom";
 import { useQueryClient } from "react-query";
-import { useRecoilValue } from "recoil";
+import { useRecoilValue, useRecoilState } from "recoil";
 import {
   Accordion,
   Strip,
@@ -12,16 +12,18 @@ import {
   Input,
 } from "@canonical/react-components";
 
+import CollaboratorsTable from "./CollaboratorsTable";
 import InvitesTable from "./InvitesTable";
 
 import { isPending } from "../utils";
 
 import {
+  useCollaboratorsQuery,
   useInvitesQuery,
   useSendInviteMutation,
   useRevokeInviteMutation,
 } from "../hooks";
-import { inviteToRevokeState } from "../atoms";
+import { activeInviteState, actionState, inviteLinkState } from "../atoms";
 
 import type { Invite } from "../types";
 
@@ -34,17 +36,20 @@ declare global {
 function Collaborators() {
   const { packageName } = useParams();
   const queryClient = useQueryClient();
-  const inviteToRevoke = useRecoilValue(inviteToRevokeState);
-  const [showRevokeConfirmation, setShowRevokeConfirmation] = useState(false);
+  const [activeInvite, setActiveInvite] = useRecoilState(activeInviteState);
+  const [inviteLink, setInviteLink] = useRecoilState(inviteLinkState);
+  const action = useRecoilValue(actionState);
+  const [showConfirmation, setShowConfirmation] = useState(false);
+  const [showInviteSuccess, setShowInviteSuccess] = useState(false);
   const [showRevokeSuccess, setShowRevokeSuccess] = useState(false);
   const [showRevokeError, setShowRevokeError] = useState(false);
-  const [newCollaboratorEmail, setNewCollaboratorEmail] = useState("");
-  const [inviteLink, setInviteLink] = useState("");
   const [showAddCollaborator, setShowAddCollaborator] = useState(false);
 
-  const closeRevokeConfirmation = () => {
-    setShowRevokeConfirmation(false);
-  };
+  const {
+    isLoading: collaboratorsIsLoading,
+    isError: collaboratorsIsError,
+    data: collaborators,
+  } = useCollaboratorsQuery(packageName);
 
   const {
     isLoading: invitesIsLoading,
@@ -54,23 +59,25 @@ function Collaborators() {
 
   const sendInviteMutation = useSendInviteMutation(
     packageName,
-    newCollaboratorEmail,
     window.CSRF_TOKEN,
     queryClient,
-    setInviteLink
+    activeInvite,
+    setInviteLink,
+    setShowInviteSuccess,
+    setShowAddCollaborator
   );
 
   const revokeInviteMutation = useRevokeInviteMutation(
     packageName,
     window.CSRF_TOKEN,
     queryClient,
-    inviteToRevoke,
+    activeInvite,
     setShowRevokeSuccess,
     setShowRevokeError
   );
 
-  const isUnique = (newCollaboratorEmail: string | undefined) => {
-    if (!newCollaboratorEmail) {
+  const isUnique = (activeInvite: string | undefined) => {
+    if (!activeInvite) {
       return true;
     }
 
@@ -79,7 +86,7 @@ function Collaborators() {
     }
 
     const existingInvites = invites.filter((invite: Invite) => {
-      return invite.email === newCollaboratorEmail && isPending(invite);
+      return invite.email === activeInvite && isPending(invite);
     });
 
     if (!existingInvites.length) {
@@ -93,6 +100,18 @@ function Collaborators() {
     <div className="l-application collaboration-ui">
       <div className="l-main">
         <Strip shallow>
+          {showInviteSuccess && (
+            <Notification
+              severity="positive"
+              onDismiss={() => {
+                setShowInviteSuccess(false);
+              }}
+            >
+              An invite has been created. <a href={inviteLink}>Accept invite</a>
+              .
+            </Notification>
+          )}
+
           {showRevokeSuccess && (
             <Notification
               severity="positive"
@@ -100,7 +119,7 @@ function Collaborators() {
                 setShowRevokeSuccess(false);
               }}
             >
-              The invite for <strong>{inviteToRevoke}</strong> has been revoked.
+              The invite for <strong>{activeInvite}</strong> has been revoked.
             </Notification>
           )}
 
@@ -112,7 +131,7 @@ function Collaborators() {
               }}
             >
               There was a problem revoking the invite for{" "}
-              <strong>{inviteToRevoke}</strong>.
+              <strong>{activeInvite}</strong>.
             </Notification>
           )}
 
@@ -132,6 +151,24 @@ function Collaborators() {
             sections={[
               {
                 key: "collaborators-table",
+                title: `Active shares ${
+                  collaborators && collaborators.length > 0
+                    ? `(${collaborators.length})`
+                    : ""
+                }`,
+                content: (
+                  <>
+                    {!collaboratorsIsLoading &&
+                      !collaboratorsIsError &&
+                      collaborators &&
+                      collaborators.length > 0 && (
+                        <CollaboratorsTable collaborators={collaborators} />
+                      )}
+                  </>
+                ),
+              },
+              {
+                key: "invites-table",
                 title: `Invites ${
                   invites && invites.length > 0 ? `(${invites.length})` : ""
                 }`,
@@ -143,9 +180,7 @@ function Collaborators() {
                       invites.length > 0 && (
                         <InvitesTable
                           invites={invites}
-                          setShowRevokeConfirmation={setShowRevokeConfirmation}
-                          inviteCollaborator={() => false}
-                          setInviteLink={setInviteLink}
+                          setShowConfirmation={setShowConfirmation}
                         />
                       )}
                   </>
@@ -163,83 +198,90 @@ function Collaborators() {
         }}
       ></div>
       <aside className={`l-aside ${!showAddCollaborator && "is-collapsed"}`}>
-        <div className="panel">
-          <div className="panel__header">
-            <h2 className="p-heading--4">Add new collaborator</h2>
-            <Button
-              appearance="base"
-              hasIcon
-              onClick={() => {
-                setShowAddCollaborator(false);
-              }}
-            >
-              <i className="p-icon--close">Close</i>
-            </Button>
-          </div>
-          <Form
-            onSubmit={(e) => {
-              e.preventDefault();
-              sendInviteMutation.mutate(newCollaboratorEmail);
-              setNewCollaboratorEmail("");
-            }}
-          >
+        <Form
+          style={{ height: "100%" }}
+          onSubmit={(e) => {
+            e.preventDefault();
+            sendInviteMutation.mutate(activeInvite);
+            setActiveInvite("");
+          }}
+        >
+          <div className="panel">
+            <div className="panel__header">
+              <h2 className="p-heading--4">Add new collaborator</h2>
+              <Button
+                appearance="base"
+                hasIcon
+                onClick={() => {
+                  setShowAddCollaborator(false);
+                }}
+              >
+                <i className="p-icon--close">Close</i>
+              </Button>
+            </div>
             <div className="panel__content">
               <Notification severity="caution" title="Role">
                 A collaborator is a store user that can have equal rights over a
                 particular package as the package publisher.
               </Notification>
-              {inviteLink && (
-                <Notification severity="positive">
-                  An invite has been created.{" "}
-                  <a href={inviteLink}>Accept invite</a>.
-                </Notification>
-              )}
               <Input
                 type="email"
                 id="collaborator-email"
                 label="Email"
                 placeholder="yourname@example.com"
                 help="The primary email for the Ubuntu One account"
-                value={newCollaboratorEmail}
+                value={activeInvite}
                 onInput={(
                   e: SyntheticEvent<HTMLInputElement> & {
                     target: HTMLInputElement;
                   }
                 ) => {
-                  setNewCollaboratorEmail(e.target.value);
+                  setActiveInvite(e.target.value);
                 }}
                 error={
-                  !isUnique(newCollaboratorEmail)
+                  !isUnique(activeInvite)
                     ? "There is already an invite for this email address"
                     : ""
                 }
               />
             </div>
-            <div className="panel__footer">
+            <div className="panel__footer u-align--right">
+              <Button
+                type="button"
+                className="u-no-margin--bottom"
+                onClick={() => {
+                  setShowAddCollaborator(false);
+                }}
+              >
+                Cancel
+              </Button>
               <Button
                 type="submit"
                 appearance="positive"
-                disabled={
-                  !newCollaboratorEmail || !isUnique(newCollaboratorEmail)
-                }
+                className="u-no-margin--bottom"
+                disabled={!activeInvite || !isUnique(activeInvite)}
               >
                 Add collaborator
               </Button>
             </div>
-          </Form>
-        </div>
+          </div>
+        </Form>
       </aside>
 
-      {showRevokeConfirmation && (
+      {showConfirmation && (
         <Modal
-          close={closeRevokeConfirmation}
-          title="Revoke invite"
+          close={() => {
+            setShowConfirmation(false);
+          }}
+          title={`${action} invite`}
           buttonRow={
             <>
               <Button
                 type="button"
                 className="u-no-margin--bottom"
-                onClick={closeRevokeConfirmation}
+                onClick={() => {
+                  setShowConfirmation(false);
+                }}
               >
                 Cancel
               </Button>
@@ -247,18 +289,25 @@ function Collaborators() {
                 appearance="positive"
                 className="u-no-margin--bottom"
                 onClick={() => {
-                  revokeInviteMutation.mutate(inviteToRevoke);
-                  setShowRevokeConfirmation(false);
+                  if (action === "Revoke") {
+                    revokeInviteMutation.mutate(activeInvite);
+                  }
+
+                  if (action === "Resend" || action === "Reopen") {
+                    sendInviteMutation.mutate(activeInvite);
+                  }
+
+                  setShowConfirmation(false);
                 }}
               >
-                Revoke invite
+                {action} invite
               </Button>
             </>
           }
         >
           <p>
-            Are you sure you want to revoke the invite for{" "}
-            <strong>{inviteToRevoke}</strong>?
+            Are you sure you want to {action.toLowerCase()} the invite for{" "}
+            <strong>{activeInvite}</strong>?
           </p>
         </Modal>
       )}
